@@ -6,6 +6,7 @@ import os
 
 from config import MAX_TOKENS, MODEL_NAME, TEMPERATURE, USE_NAVIGATOR
 
+from agent.event_stream import EventStream
 from agent.emulator import Emulator
 from anthropic import Anthropic
 
@@ -94,7 +95,7 @@ if USE_NAVIGATOR:
 
 
 class SimpleAgent:
-    def __init__(self, rom_path, headless=True, sound=False, max_history=60, load_state=None):
+    def __init__(self, rom_path, headless=True, sound=False, max_history=60, load_state=None, event_log=None):
         """Initialize the simple agent.
 
         Args:
@@ -103,21 +104,32 @@ class SimpleAgent:
             sound: Whether to enable sound
             max_history: Maximum number of messages in history before summarization
         """
+        self.events = EventStream(event_log)
         self.emulator = Emulator(rom_path, headless, sound)
         self.emulator.initialize()  # Initialize the emulator
         self.client = Anthropic()
         self.running = True
         self.message_history = [{"role": "user", "content": "You may now begin playing."}]
         self.max_history = max_history
+        self.events.emit(
+            "agent_started",
+            rom_path=rom_path,
+            headless=headless,
+            sound=sound,
+            max_history=max_history,
+            model=MODEL_NAME,
+        )
         if load_state:
             logger.info(f"Loading saved state from {load_state}")
             self.emulator.load_state(load_state)
+            self.events.emit("state_loaded", path=load_state)
 
     def process_tool_call(self, tool_call):
         """Process a single tool call."""
         tool_name = tool_call.name
         tool_input = tool_call.input
         logger.info(f"Processing tool call: {tool_name}")
+        self.events.emit("tool_call", name=tool_name, input=tool_input)
 
         if tool_name == "press_buttons":
             buttons = tool_input["buttons"]
@@ -140,6 +152,14 @@ class SimpleAgent:
             collision_map = self.emulator.get_collision_map()
             if collision_map:
                 logger.info(f"[Collision Map after action]\n{collision_map}")
+
+            self.events.emit(
+                "tool_result",
+                name=tool_name,
+                result=f"Pressed buttons: {', '.join(buttons)}",
+                memory=memory_info,
+                collision_map=collision_map,
+            )
             
             # Return tool result as a dictionary
             return {
@@ -186,6 +206,15 @@ class SimpleAgent:
             collision_map = self.emulator.get_collision_map()
             if collision_map:
                 logger.info(f"[Collision Map after action]\n{collision_map}")
+
+            self.events.emit(
+                "tool_result",
+                name=tool_name,
+                result=result,
+                path=path,
+                memory=memory_info,
+                collision_map=collision_map,
+            )
             
             # Return tool result as a dictionary
             return {
@@ -207,6 +236,7 @@ class SimpleAgent:
             }
         else:
             logger.error(f"Unknown tool called: {tool_name}")
+            self.events.emit("tool_error", name=tool_name, error=f"Unknown tool '{tool_name}'")
             return {
                 "type": "tool_result",
                 "tool_use_id": tool_call.id,
@@ -222,6 +252,7 @@ class SimpleAgent:
             num_steps: Number of steps to run for
         """
         logger.info(f"Starting agent loop for {num_steps} steps")
+        self.events.emit("run_started", steps=num_steps)
 
         steps_completed = 0
         while self.running and steps_completed < num_steps:
@@ -247,6 +278,7 @@ class SimpleAgent:
                 )
 
                 logger.info(f"Response usage: {response.usage}")
+                self.events.emit("model_usage", usage=response.usage)
 
                 # Extract tool calls
                 tool_calls = [
@@ -257,8 +289,10 @@ class SimpleAgent:
                 for block in response.content:
                     if block.type == "text":
                         logger.info(f"[Text] {block.text}")
+                        self.events.emit("public_thought", text=block.text)
                     elif block.type == "tool_use":
                         logger.info(f"[Tool] Using tool: {block.name}")
+                        self.events.emit("tool_selected", name=block.name, input=block.input)
 
                 # Process tool calls
                 if tool_calls:
@@ -291,12 +325,15 @@ class SimpleAgent:
 
                 steps_completed += 1
                 logger.info(f"Completed step {steps_completed}/{num_steps}")
+                self.events.emit("step_completed", step=steps_completed, total_steps=num_steps)
 
             except KeyboardInterrupt:
                 logger.info("Received keyboard interrupt, stopping")
                 self.running = False
+                self.events.emit("run_interrupted", step=steps_completed)
             except Exception as e:
                 logger.error(f"Error in agent loop: {e}")
+                self.events.emit("run_error", error=str(e), step=steps_completed)
                 raise e
 
         if not self.running:
@@ -307,6 +344,7 @@ class SimpleAgent:
     def summarize_history(self):
         """Generate a summary of the conversation history and replace the history with just the summary."""
         logger.info(f"[Agent] Generating conversation summary...")
+        self.events.emit("summary_started", history_items=len(self.message_history))
         
         # Get a new screenshot for the summary
         screenshot = self.emulator.get_screenshot()
@@ -349,6 +387,7 @@ class SimpleAgent:
         
         logger.info(f"[Agent] Game Progress Summary:")
         logger.info(f"{summary_text}")
+        self.events.emit("summary_completed", text=summary_text)
         
         # Replace message history with just the summary
         self.message_history = [
@@ -384,6 +423,7 @@ class SimpleAgent:
     def stop(self):
         """Stop the agent."""
         self.running = False
+        self.events.emit("agent_stopped")
         self.emulator.stop()
 
 

@@ -49,6 +49,12 @@ def main():
         default=None, 
         help="Path to a saved state to load"
     )
+    parser.add_argument(
+        "--event-log",
+        type=str,
+        default="runs/events.jsonl",
+        help="Path to write structured JSONL agent events for an overlay"
+    )
     
     args = parser.parse_args()
     
@@ -72,6 +78,7 @@ def main():
         sound=args.sound if args.display else False,
         max_history=args.max_history,
         load_state=args.load_state,
+        event_log=args.event_log,
     )
     
     try:
